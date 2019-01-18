@@ -46,6 +46,7 @@ import javax.enterprise.inject.se.SeContainerInitializer;
 
 import javax.inject.Inject;
 
+import javax.ws.rs.ApplicationPath;
 import javax.ws.rs.Path;
 
 import javax.ws.rs.core.Application;
@@ -136,8 +137,9 @@ public class TestExtension {
    *
    * @see HelidonJAXRSExtension.ClassDepthComparator
    */
-  @Dependent
+  @RequestScoped
   @Priority(1)
+  @ApplicationPath("foo")
   private static final class MyApplication extends Application implements Serializable {
 
     private static final long serialVersionUID = 1L;
@@ -151,12 +153,13 @@ public class TestExtension {
     }
 
     @Override
-    public Set<Class<?>> getClasses() {
+    public final Set<Class<?>> getClasses() {
       return Collections.singleton(StupidResource.class);
     }
 
   }
-  
+
+  @Path("/frob")
   private static final class StupidResource {
 
     public StupidResource() {

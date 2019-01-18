@@ -16,6 +16,11 @@
  */
 package org.microbean.helidon.webserver.jaxrs.cdi;
 
+import java.lang.annotation.Target;
+import java.lang.annotation.ElementType;
+import java.lang.annotation.Retention;
+import java.lang.annotation.RetentionPolicy;
+
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 
@@ -32,6 +37,7 @@ import javax.enterprise.context.Dependent;
 import javax.enterprise.context.spi.CreationalContext;
 
 import javax.enterprise.inject.Any;
+import javax.enterprise.inject.CreationException;
 
 import javax.enterprise.inject.spi.AfterBeanDiscovery;
 import javax.enterprise.inject.spi.Annotated;
@@ -44,23 +50,45 @@ import javax.enterprise.inject.spi.ProcessAnnotatedType;
 import javax.enterprise.inject.spi.ProcessInjectionTarget;
 import javax.enterprise.inject.spi.ProcessBean;
 import javax.enterprise.inject.spi.ProcessBeanAttributes;
+import javax.enterprise.inject.spi.ProcessSyntheticBean;
 import javax.enterprise.inject.spi.WithAnnotations;
 import javax.enterprise.inject.spi.Unmanaged;
+
+import javax.enterprise.inject.spi.configurator.BeanConfigurator;
 
 import javax.enterprise.event.Observes;
 
 import javax.enterprise.util.AnnotationLiteral;
 
+import javax.inject.Qualifier;
 import javax.inject.Singleton;
 
+import javax.ws.rs.ApplicationPath;
 import javax.ws.rs.Path;
 
+import javax.ws.rs.client.ClientRequestFilter;
+import javax.ws.rs.client.ClientResponseFilter;
+import javax.ws.rs.client.RxInvokerProvider;
+
+import javax.ws.rs.container.ContainerRequestFilter;
+import javax.ws.rs.container.ContainerResponseFilter;
+import javax.ws.rs.container.DynamicFeature;
+
 import javax.ws.rs.core.Application;
-import javax.ws.rs.ApplicationPath;
+import javax.ws.rs.core.Feature;
+
+import javax.ws.rs.ext.ContextResolver;
+import javax.ws.rs.ext.ExceptionMapper;
+import javax.ws.rs.ext.MessageBodyReader;
+import javax.ws.rs.ext.MessageBodyWriter;
+import javax.ws.rs.ext.ParamConverterProvider;
+import javax.ws.rs.ext.Provider;
+import javax.ws.rs.ext.ReaderInterceptor;
+import javax.ws.rs.ext.WriterInterceptor;
 
 public class HelidonJAXRSExtension implements Extension {
 
-  private static final ApplicationPath DEFAULT_APPLICATION_PATH = new ApplicationPathLiteral();
+  private static final ApplicationPath DEFAULT_APPLICATION_PATH = new ApplicationPathLiteral("");
 
   private static final Map<Class<?>, Unmanaged<?>> unmanageds = new HashMap<>();
 
@@ -68,7 +96,7 @@ public class HelidonJAXRSExtension implements Extension {
     super();
   }
 
-  private final <T extends Application> void processApplication(@Observes final ProcessAnnotatedType<T> event) {
+  private final <T extends Application> void ensureApplicationPathOnApplications(@Observes final ProcessAnnotatedType<T> event) {
     if (event != null) {
       final AnnotatedType<T> application = event.getAnnotatedType();
       if (application != null) {
@@ -99,9 +127,7 @@ public class HelidonJAXRSExtension implements Extension {
     }
   }
 
-  private final void registerClassesAndSingletons(@Observes final AfterBeanDiscovery event,
-                                                  final BeanManager beanManager)
-  {
+  private final void registerClassesAndSingletons(@Observes final AfterBeanDiscovery event, final BeanManager beanManager) {
     if (event != null && beanManager != null) {
       final Set<Bean<?>> beans = beanManager.getBeans(Application.class, Any.Literal.INSTANCE);
       if (beans != null && !beans.isEmpty()) {
@@ -114,9 +140,9 @@ public class HelidonJAXRSExtension implements Extension {
     }
   }
 
-  private static final <T extends Application> void registerClassesAndSingletons(final AfterBeanDiscovery event,
-                                                                                 final Bean<T> bean,
-                                                                                 final BeanManager beanManager)
+  private static final <T extends Application, U> void registerClassesAndSingletons(final AfterBeanDiscovery event,
+                                                                                    final Bean<T> bean,
+                                                                                    final BeanManager beanManager)
   {
     Objects.requireNonNull(event);
     Objects.requireNonNull(bean);
@@ -138,14 +164,48 @@ public class HelidonJAXRSExtension implements Extension {
     final CreationalContext<T> cc = beanManager.createCreationalContext(bean);
     final T application = bean.create(cc);
     if (application != null) {
+
+      // application should not be a proxy because we've asked the
+      // Bean to create it directly.  That's good; we can get
+      // its @ApplicationPath directly.
+      final ApplicationPath applicationPath;
+      final Class<?> applicationClass = application.getClass();
+      assert !applicationClass.isSynthetic();
+      if (applicationClass.isAnnotationPresent(ApplicationPath.class)) {
+        applicationPath = applicationClass.getAnnotation(ApplicationPath.class);
+      } else {
+        applicationPath = DEFAULT_APPLICATION_PATH;
+      }
+      assert applicationPath != null;
+      event.addBean()
+        .types(ApplicationPath.class)
+        .qualifiers(bean.getQualifiers())
+        .scope(Singleton.class)
+        .createWith(ignored -> applicationPath);
+      
       final Set<Class<?>> classes = application.getClasses();
       if (classes != null && !classes.isEmpty()) {
         for (final Class<?> cls : classes) {
           if (cls != null) {
-            event.addBean()
-              .scope(Dependent.class) // Dependent by default...
-              .read(beanManager.createAnnotatedType(cls)) // ...but overridable
-              .addQualifiers(bean.getQualifiers()); // TODO: maybe?
+            @SuppressWarnings("unchecked")
+            final AnnotatedType<U> annotatedType = beanManager.createAnnotatedType((Class<U>)cls);
+            assert annotatedType != null;
+            
+            final BeanConfigurator<U> bc = event.addBean();
+            assert bc != null;
+            bc.read(annotatedType)
+              .addQualifiers(bean.getQualifiers());
+            if (annotatedType.isAnnotationPresent(Path.class) ||
+                annotatedType.getMethods()
+                .stream()
+                .filter(m -> m.isAnnotationPresent(Path.class))
+                .findAny()
+                .isPresent()) {
+              bc.addQualifier(new ResourceClass.Literal(cls));
+            } else if (isProviderClass(cls)) {
+              // TODO: Features aren't supported, nor is it clear they should be
+              bc.addQualifier(ProviderLiteral.INSTANCE);
+            }
           }
         }
       }
@@ -154,27 +214,69 @@ public class HelidonJAXRSExtension implements Extension {
         for (final Object singleton : singletons) {
           if (singleton != null) {
             event.addBean()
-              .scope(Singleton.class) // Singleton by default...
-              .read(beanManager.createBeanAttributes(beanManager.createAnnotatedType(singleton.getClass()))) // ...but overridable
-              .qualifiers(bean.getQualifiers()) // TODO: maybe?
+              .read(beanManager.createBeanAttributes(beanManager.createAnnotatedType(singleton.getClass())))
+              .scope(ApplicationScoped.class)
+              .addQualifiers(bean.getQualifiers()) // TODO: maybe?
               .createWith(ignored -> singleton);
           }
         }
+      }
+      // Not sure about this block; may not be necessary.
+      final Map<String, Object> properties = application.getProperties();
+      if (properties != null && !properties.isEmpty()) {
+        event.addBean()
+          .read(beanManager.createBeanAttributes(beanManager.createAnnotatedType(properties.getClass())))
+          .scope(Singleton.class)
+          .addQualifiers(bean.getQualifiers()) // TODO: maybe?
+          .addQualifier(ApplicationPropertiesLiteral.INSTANCE)
+          .createWith(ignored -> properties);
       }
     }
     bean.destroy(application, cc);
     cc.release();
   }
 
+  private static final boolean isProviderClass(final Class<?> cls) {
+    return cls != null &&
+      (
+        ClientRequestFilter.class.isAssignableFrom(cls) ||
+        ClientResponseFilter.class.isAssignableFrom(cls) ||
+        ContainerRequestFilter.class.isAssignableFrom(cls) ||
+        ContainerResponseFilter.class.isAssignableFrom(cls) ||
+        ContextResolver.class.isAssignableFrom(cls) ||
+        DynamicFeature.class.isAssignableFrom(cls) ||
+        Feature.class.isAssignableFrom(cls) ||
+        ExceptionMapper.class.isAssignableFrom(cls) ||
+        MessageBodyReader.class.isAssignableFrom(cls) ||
+        MessageBodyWriter.class.isAssignableFrom(cls) ||
+        ParamConverterProvider.class.isAssignableFrom(cls) ||
+        ReaderInterceptor.class.isAssignableFrom(cls) ||
+        RxInvokerProvider.class.isAssignableFrom(cls) ||
+        WriterInterceptor.class.isAssignableFrom(cls)
+      );
+  }
+    
+  private final <T> void processResources(@Observes final ProcessSyntheticBean<T> event) {
+    if (event != null && (event.getSource() instanceof HelidonJAXRSExtension)) {
+      // It's a synthetic bean we added, not one that somebody else added.
+      
+    }
+  }
+
   private static final class ApplicationPathLiteral extends AnnotationLiteral<ApplicationPath> implements ApplicationPath {
 
     private static final long serialVersionUID = 1L;
-    
+
     private final String value;
     
-    private ApplicationPathLiteral() {
+    private ApplicationPathLiteral(String value) {
       super();
-      this.value = "/";
+      if (value == null) {
+        value = "";
+      } else {
+        value = value.trim();
+      }
+      this.value = value;
     }
     
     @Override
@@ -182,6 +284,37 @@ public class HelidonJAXRSExtension implements Extension {
       return this.value;
     }
     
+  }
+
+  @Qualifier
+  @Retention(RetentionPolicy.RUNTIME)
+  @Target(ElementType.TYPE)
+  private static @interface ApplicationProperties {
+
+  }
+
+  private static final class ApplicationPropertiesLiteral extends AnnotationLiteral<ApplicationProperties> implements ApplicationProperties {
+
+    private static final long serialVersionUID = 1L;
+
+    private static final ApplicationProperties INSTANCE = new ApplicationPropertiesLiteral();
+
+    private ApplicationPropertiesLiteral() {
+      super();
+    }
+
+  }
+
+  private static final class ProviderLiteral extends AnnotationLiteral<Provider> implements Provider {
+
+    private static final long serialVersionUID = 1L;
+
+    private static final Provider INSTANCE = new ProviderLiteral();
+
+    private ProviderLiteral() {
+      super();
+    }
+
   }
   
 }
