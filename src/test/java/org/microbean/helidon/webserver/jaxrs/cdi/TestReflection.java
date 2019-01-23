@@ -26,6 +26,13 @@ import java.util.Set;
 
 import java.util.function.Function;
 
+import javax.enterprise.inject.se.SeContainer;
+import javax.enterprise.inject.se.SeContainerInitializer;
+
+import javax.enterprise.inject.spi.AnnotatedMethod;
+import javax.enterprise.inject.spi.AnnotatedType;
+import javax.enterprise.inject.spi.BeanManager;
+
 import javax.ws.rs.Produces;
 
 import org.junit.Test;
@@ -103,11 +110,22 @@ public class TestReflection {
 
   @Test
   public void testFindMethod() throws ReflectiveOperationException {
-    final Method spew = ConcreteFrobnicator.class.getMethod("spew");
-    assertNotNull(spew);
-    final Produces produces = ResourceClassSelector.find(spew, m -> m.getAnnotation(Produces.class));
-    assertNotNull(produces);
-    assertEquals("ConcreteFrobnicator", produces.value()[0]);
+    try (final SeContainer container = SeContainerInitializer.newInstance().disableDiscovery().addBeanClasses(ConcreteFrobnicator.class).initialize()) {
+      assertNotNull(container);
+      final BeanManager beanManager = container.getBeanManager();
+      assertNotNull(beanManager);
+      final AnnotatedType<ConcreteFrobnicator> annotatedConcreteFrobnicatorType = beanManager.createAnnotatedType(ConcreteFrobnicator.class);
+      assertNotNull(annotatedConcreteFrobnicatorType);
+      final AnnotatedMethod<? super ConcreteFrobnicator> spew = annotatedConcreteFrobnicatorType.getMethods()
+        .stream()
+        .filter(am -> am.getJavaMember().getName().equals("spew"))
+        .findAny()
+        .get();
+      assertNotNull(spew);
+      final Produces produces = ResourceClasses.find(beanManager, spew, m -> m.getAnnotation(Produces.class));      
+      assertNotNull(produces);
+      assertEquals("ConcreteFrobnicator", produces.value()[0]);
+    }
   }
 
   private static interface Frobnicator {

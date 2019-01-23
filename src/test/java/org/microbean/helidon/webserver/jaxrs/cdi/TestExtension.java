@@ -47,6 +47,7 @@ import javax.enterprise.inject.se.SeContainerInitializer;
 import javax.inject.Inject;
 
 import javax.ws.rs.ApplicationPath;
+import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 
 import javax.ws.rs.core.Application;
@@ -63,6 +64,8 @@ import io.helidon.webserver.WebServer;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+
+import org.microbean.helidon.webserver.cdi.HelidonWebServerExtension;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -109,14 +112,19 @@ public class TestExtension {
    */
   
   
-  private void onStartup(@Observes @Initialized(ApplicationScoped.class) final Object event, final Application application) {
+  private void onStartup(@Observes @Initialized(ApplicationScoped.class) final Object event,
+                         final Application application,
+                         final HelidonWebServerExtension shutMeDown)
+  {
     assertNotNull(application);
+    assertNotNull(shutMeDown);
     final Class<?> c = application.getClass();
     assertNotNull(c);
     assertTrue(c.isSynthetic()); // proves @Dependent got replaced with @ApplicationScoped
     final Class<?> superclass = c.getSuperclass();
     assertEquals(Application.class, superclass);
     assertNotNull(application.toString());
+    shutMeDown.shutDown();
   }
 
 
@@ -167,6 +175,7 @@ public class TestExtension {
     }
 
     @Path("/foo")
+    @GET
     public Object gorp() {
       return null;
     }

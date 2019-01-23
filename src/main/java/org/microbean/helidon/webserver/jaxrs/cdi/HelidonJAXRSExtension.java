@@ -31,6 +31,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import java.util.regex.Matcher;
+
 import javax.enterprise.context.ApplicationScoped;
 import javax.enterprise.context.Dependent;
 
@@ -127,7 +129,8 @@ public class HelidonJAXRSExtension implements Extension {
     }
   }
 
-  private final void registerClassesAndSingletons(@Observes final AfterBeanDiscovery event, final BeanManager beanManager) {
+  private final void registerClassesAndSingletons(@Observes final AfterBeanDiscovery event, final BeanManager beanManager)
+    throws ReflectiveOperationException {
     if (event != null && beanManager != null) {
       final Set<Bean<?>> beans = beanManager.getBeans(Application.class, Any.Literal.INSTANCE);
       if (beans != null && !beans.isEmpty()) {
@@ -143,7 +146,7 @@ public class HelidonJAXRSExtension implements Extension {
   private static final <T extends Application, U> void registerClassesAndSingletons(final AfterBeanDiscovery event,
                                                                                     final Bean<T> bean,
                                                                                     final BeanManager beanManager)
-  {
+    throws ReflectiveOperationException {
     Objects.requireNonNull(event);
     Objects.requireNonNull(bean);
     Objects.requireNonNull(beanManager);
@@ -177,6 +180,14 @@ public class HelidonJAXRSExtension implements Extension {
         applicationPath = DEFAULT_APPLICATION_PATH;
       }
       assert applicationPath != null;
+
+      String applicationPathString = applicationPath.value();
+      assert applicationPathString != null;
+      if (!applicationPathString.isEmpty()) {
+        final Matcher matcher = ResourceMethodDescriptor.pattern.matcher(applicationPathString);
+        applicationPathString = matcher.replaceAll("$2");
+      }
+      
       event.addBean()
         .types(ApplicationPath.class)
         .qualifiers(bean.getQualifiers())
@@ -190,21 +201,26 @@ public class HelidonJAXRSExtension implements Extension {
             @SuppressWarnings("unchecked")
             final AnnotatedType<U> annotatedType = beanManager.createAnnotatedType((Class<U>)cls);
             assert annotatedType != null;
-            
+
             final BeanConfigurator<U> bc = event.addBean();
             assert bc != null;
             bc.read(annotatedType)
               .addQualifiers(bean.getQualifiers());
-            if (annotatedType.isAnnotationPresent(Path.class) ||
-                annotatedType.getMethods()
-                .stream()
-                .filter(m -> m.isAnnotationPresent(Path.class))
-                .findAny()
-                .isPresent()) {
-              bc.addQualifier(new ResourceClass.Literal(cls));
-            } else if (isProviderClass(cls)) {
+            
+            final Set<? extends ResourceMethodDescriptor> resourceMethodDescriptors =
+              ResourceClasses.getResourceMethodDescriptors(beanManager, applicationPathString, annotatedType);
+            if (isProviderClass(cls)) {
               // TODO: Features aren't supported, nor is it clear they should be
               bc.addQualifier(ProviderLiteral.INSTANCE);
+            } else if (resourceMethodDescriptors != null && !resourceMethodDescriptors.isEmpty()) {
+              bc.addQualifier(new ResourceClass.Literal(cls));
+
+              for (final ResourceMethodDescriptor descriptor : resourceMethodDescriptors) {
+                if (descriptor != null) {
+                  // TODO: add a bean for a Handler wrapping this descriptor
+                    
+                }
+              }
             }
           }
         }
