@@ -16,25 +16,20 @@
  */
 package org.microbean.helidon.webserver.jaxrs.cdi;
 
+import java.lang.annotation.Annotation;
 import java.lang.annotation.Target;
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
-
-import java.lang.reflect.Modifier;
 import java.lang.reflect.Type;
 
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
-import java.util.regex.Matcher;
+import javax.annotation.Priority;
 
 import javax.enterprise.context.ApplicationScoped;
-import javax.enterprise.context.Dependent;
 
 import javax.enterprise.context.spi.CreationalContext;
 
@@ -42,20 +37,19 @@ import javax.enterprise.inject.Any;
 import javax.enterprise.inject.CreationException;
 
 import javax.enterprise.inject.spi.AfterBeanDiscovery;
-import javax.enterprise.inject.spi.Annotated;
 import javax.enterprise.inject.spi.AnnotatedType;
 import javax.enterprise.inject.spi.Bean;
 import javax.enterprise.inject.spi.BeanAttributes;
 import javax.enterprise.inject.spi.BeanManager;
+import javax.enterprise.inject.spi.BeforeBeanDiscovery;
 import javax.enterprise.inject.spi.Extension;
+import javax.enterprise.inject.spi.InjectionTargetFactory;
 import javax.enterprise.inject.spi.ProcessAnnotatedType;
-import javax.enterprise.inject.spi.ProcessInjectionTarget;
-import javax.enterprise.inject.spi.ProcessBean;
 import javax.enterprise.inject.spi.ProcessBeanAttributes;
 import javax.enterprise.inject.spi.ProcessSyntheticBean;
-import javax.enterprise.inject.spi.WithAnnotations;
-import javax.enterprise.inject.spi.Unmanaged;
 
+import javax.enterprise.inject.spi.configurator.AnnotatedMethodConfigurator;
+import javax.enterprise.inject.spi.configurator.AnnotatedParameterConfigurator;
 import javax.enterprise.inject.spi.configurator.BeanConfigurator;
 
 import javax.enterprise.event.Observes;
@@ -65,8 +59,10 @@ import javax.enterprise.util.AnnotationLiteral;
 import javax.inject.Qualifier;
 import javax.inject.Singleton;
 
+import javax.interceptor.Interceptor;
+
 import javax.ws.rs.ApplicationPath;
-import javax.ws.rs.Path;
+import javax.ws.rs.PathParam;
 
 import javax.ws.rs.client.ClientRequestFilter;
 import javax.ws.rs.client.ClientResponseFilter;
@@ -88,14 +84,18 @@ import javax.ws.rs.ext.Provider;
 import javax.ws.rs.ext.ReaderInterceptor;
 import javax.ws.rs.ext.WriterInterceptor;
 
+import org.microbean.helidon.webserver.cdi.HelidonWebServerExtension;
+
 public class HelidonJAXRSExtension implements Extension {
 
   private static final ApplicationPath DEFAULT_APPLICATION_PATH = new ApplicationPathLiteral("");
 
-  private static final Map<Class<?>, Unmanaged<?>> unmanageds = new HashMap<>();
-
   public HelidonJAXRSExtension() {
     super();
+  }
+
+  private final void makeCertainJaxRsAnnotationsQualifiers(@Observes final BeforeBeanDiscovery event) {
+    event.addQualifier(PathParam.class); // TODO: and so on
   }
 
   private final <T extends Application> void ensureApplicationPathOnApplications(@Observes final ProcessAnnotatedType<T> event) {
@@ -111,7 +111,7 @@ public class HelidonJAXRSExtension implements Extension {
           if (value == null || value.trim().isEmpty()) {
             event.configureAnnotatedType()
               .add(DEFAULT_APPLICATION_PATH);
-          }          
+          }
         }
       }
     }
@@ -129,7 +129,7 @@ public class HelidonJAXRSExtension implements Extension {
     }
   }
 
-  private final void registerClassesAndSingletons(@Observes final AfterBeanDiscovery event, final BeanManager beanManager)
+  private final void registerClassesAndSingletons(@Observes @Priority(Interceptor.Priority.APPLICATION) final AfterBeanDiscovery event, final BeanManager beanManager)
     throws ReflectiveOperationException {
     if (event != null && beanManager != null) {
       final Set<Bean<?>> beans = beanManager.getBeans(Application.class, Any.Literal.INSTANCE);
@@ -184,13 +184,15 @@ public class HelidonJAXRSExtension implements Extension {
       String applicationPathString = applicationPath.value();
       assert applicationPathString != null;
       if (!applicationPathString.isEmpty()) {
-        final Matcher matcher = ResourceMethodDescriptor.pattern.matcher(applicationPathString);
-        applicationPathString = matcher.replaceAll("$2");
+        applicationPathString = ResourceMethodDescriptor.pattern.matcher(applicationPathString).replaceAll("$2");
       }
+
+      final Set<Annotation> qualifiers = bean.getQualifiers();
+      beanManager.getExtension(HelidonWebServerExtension.class).addQualifiers(qualifiers);
       
       event.addBean()
         .types(ApplicationPath.class)
-        .qualifiers(bean.getQualifiers())
+        .qualifiers(qualifiers)
         .scope(Singleton.class)
         .createWith(ignored -> applicationPath);
       
@@ -205,20 +207,43 @@ public class HelidonJAXRSExtension implements Extension {
             final BeanConfigurator<U> bc = event.addBean();
             assert bc != null;
             bc.read(annotatedType)
-              .addQualifiers(bean.getQualifiers());
+              .addQualifiers(qualifiers);
             
-            final Set<? extends ResourceMethodDescriptor> resourceMethodDescriptors =
-              ResourceClasses.getResourceMethodDescriptors(beanManager, applicationPathString, annotatedType);
             if (isProviderClass(cls)) {
               // TODO: Features aren't supported, nor is it clear they should be
               bc.addQualifier(ProviderLiteral.INSTANCE);
-            } else if (resourceMethodDescriptors != null && !resourceMethodDescriptors.isEmpty()) {
-              bc.addQualifier(new ResourceClass.Literal(cls));
 
-              for (final ResourceMethodDescriptor descriptor : resourceMethodDescriptors) {
-                if (descriptor != null) {
-                  // TODO: add a bean for a Handler wrapping this descriptor
+            } else {
+              final Set<? extends ResourceMethodDescriptor<U>> resourceMethodDescriptors =
+                ResourceClasses.getResourceMethodDescriptors(beanManager, applicationPathString, annotatedType, qualifiers);
+              if (resourceMethodDescriptors != null && !resourceMethodDescriptors.isEmpty()) {
+                bc.addQualifier(new ResourceClass.Literal(cls));
+                
+                for (final ResourceMethodDescriptor<U> descriptor : resourceMethodDescriptors) {
+                  if (descriptor != null) {
+
+                    event.addBean()
+                      .addTransitiveTypeClosure(descriptor.getClass())
+                      .qualifiers(qualifiers)
+                      .scope(ApplicationScoped.class)
+                      .createWith(ignored -> descriptor);
                     
+                    // Create a Handler bean that wraps the JAX-RSish
+                    // resource method.
+                    event.addBean()
+                      .addTransitiveTypeClosure(ResourceMethodHandler.class)
+                      .qualifiers(qualifiers)
+                      .scope(ApplicationScoped.class)
+                      .createWith(ignored -> {
+                          try {
+                            return new ResourceMethodHandler<>(beanManager, descriptor);
+                          } catch (final ReflectiveOperationException reflectiveOperationException) {
+                            throw new CreationException(reflectiveOperationException.getMessage(),
+                                                        reflectiveOperationException);
+                          }
+                        });
+                    
+                  }
                 }
               }
             }
@@ -232,7 +257,7 @@ public class HelidonJAXRSExtension implements Extension {
             event.addBean()
               .read(beanManager.createBeanAttributes(beanManager.createAnnotatedType(singleton.getClass())))
               .scope(ApplicationScoped.class)
-              .addQualifiers(bean.getQualifiers()) // TODO: maybe?
+              .addQualifiers(qualifiers) // TODO: maybe?
               .createWith(ignored -> singleton);
           }
         }
@@ -243,10 +268,60 @@ public class HelidonJAXRSExtension implements Extension {
         event.addBean()
           .read(beanManager.createBeanAttributes(beanManager.createAnnotatedType(properties.getClass())))
           .scope(Singleton.class)
-          .addQualifiers(bean.getQualifiers()) // TODO: maybe?
+          .addQualifiers(qualifiers) // TODO: maybe?
           .addQualifier(ApplicationPropertiesLiteral.INSTANCE)
           .createWith(ignored -> properties);
       }
+
+      // OK, we've added beans for all the resource and provider
+      // classes and singletons and properties.  Now add one for the
+      // relevant Service.
+      final AnnotatedType<ResourceClassService> resourceClassServiceAnnotatedType = beanManager.createAnnotatedType(ResourceClassService.class);
+
+      final InjectionTargetFactory<ResourceClassService> itf = beanManager.getInjectionTargetFactory(resourceClassServiceAnnotatedType);
+      assert itf != null;
+
+      // Add the right qualifiers to the @Inject-annotated update() method.
+      final AnnotatedMethodConfigurator<? super ResourceClassService> amc = itf.configure()
+        .filterMethods(am -> am.getJavaMember().getName().equals("update"))
+        .findFirst()
+        .get();
+      AnnotatedParameterConfigurator<? super ResourceClassService> apc = amc.filterParams(ap -> ap != null)
+        .findFirst()
+        .get();
+      for (final Annotation qualifier : qualifiers) {
+        apc.add(qualifier);
+      }
+
+      // Add the right qualifiers to the @Inject-annotated constructor.
+      apc = itf.configure()
+        .constructors()
+        .stream()
+        .findFirst()
+        .get()
+        .params()
+        .get(0);
+      for (final Annotation qualifier : qualifiers) {
+        apc.add(qualifier);
+      }
+
+      final BeanAttributes<ResourceClassService> beanAttributes = beanManager.createBeanAttributes(resourceClassServiceAnnotatedType);      
+      final BeanAttributes<ResourceClassService> resourceClassServiceBeanAttributes = new DelegatingBeanAttributes<ResourceClassService>(beanAttributes) {
+
+          @Override
+          public final Class<? extends Annotation> getScope() {
+            return ApplicationScoped.class;
+          }
+
+          @Override
+          public final Set<Annotation> getQualifiers() {
+            return qualifiers;
+          }
+          
+        };
+
+      final Bean<ResourceClassService> resourceClassServiceBean = beanManager.createBean(resourceClassServiceBeanAttributes, ResourceClassService.class, itf);
+      event.addBean(resourceClassServiceBean);
     }
     bean.destroy(application, cc);
     cc.release();
@@ -332,5 +407,46 @@ public class HelidonJAXRSExtension implements Extension {
     }
 
   }
-  
+
+  private static class DelegatingBeanAttributes<T> implements BeanAttributes<T> {
+
+    private final BeanAttributes<T> delegate;
+    
+    private DelegatingBeanAttributes(final BeanAttributes<T> delegate) {
+      super();
+      this.delegate = Objects.requireNonNull(delegate);
+    }
+    
+    @Override
+    public Set<Type> getTypes() {
+      return this.delegate.getTypes();
+    }
+
+    @Override
+    public Set<Annotation> getQualifiers() {
+      return this.delegate.getQualifiers();
+    }
+
+    @Override
+    public Class<? extends Annotation> getScope() {
+      return this.delegate.getScope();
+    }
+
+    @Override
+    public String getName() {
+      return this.delegate.getName();
+    }
+
+    @Override
+    public Set<Class<? extends Annotation>> getStereotypes() {
+      return this.delegate.getStereotypes();
+    }
+
+    @Override
+    public boolean isAlternative() {
+      return this.delegate.isAlternative();
+    }
+
+  }
+
 }

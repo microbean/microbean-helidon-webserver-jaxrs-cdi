@@ -81,7 +81,7 @@
       <dependency>
         <groupId>org.microbean</groupId>
         <artifactId>microbean-helidon-webserver-cdi</artifactId>
-        <version>0.2.3</version>
+        <version>0.2.4</version>
         <type>jar</type>
       </dependency>
       
@@ -245,12 +245,6 @@
       <scope>runtime</scope>
       <optional>true</optional>
     </dependency>
-
-    <dependency>
-      <groupId>org.microbean</groupId>
-      <artifactId>microbean-helidon-webserver-cdi</artifactId>
-      <scope>runtime</scope>
-    </dependency>
     
     
     <!-- Provided-scoped dependencies. -->
@@ -288,6 +282,12 @@
     <dependency>
       <groupId>io.helidon.webserver</groupId>
       <artifactId>helidon-webserver</artifactId>
+      <scope>compile</scope>
+    </dependency>
+
+    <dependency>
+      <groupId>org.microbean</groupId>
+      <artifactId>microbean-helidon-webserver-cdi</artifactId>
       <scope>compile</scope>
     </dependency>
 

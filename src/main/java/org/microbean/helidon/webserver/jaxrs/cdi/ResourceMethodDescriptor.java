@@ -18,8 +18,7 @@ package org.microbean.helidon.webserver.jaxrs.cdi;
 
 import java.lang.annotation.Annotation;
 
-import java.lang.reflect.AnnotatedElement;
-import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 
 import java.util.Collections;
 import java.util.Objects;
@@ -36,18 +35,17 @@ import javax.enterprise.inject.spi.BeanManager;
 
 import javax.ws.rs.Consumes;
 import javax.ws.rs.HttpMethod;
-import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 import javax.ws.rs.Produces;
 
 import io.helidon.common.http.Http;
 import io.helidon.common.http.MediaType;
 
-public class ResourceMethodDescriptor {
+public class ResourceMethodDescriptor<X> {
 
   static final Pattern pattern = Pattern.compile("^(\\s*/*\\s*)(.+)(\\s*/*\\s*)$");
   
-  private final Http.Method httpMethod;
+  private final Http.RequestMethod httpMethod;
   
   private final Set<? extends MediaType> consumedMediaTypes;
   
@@ -55,14 +53,22 @@ public class ResourceMethodDescriptor {
   
   private final String path;
   
-  private final Method resourceMethod;
+  private final AnnotatedMethod<? super X> resourceMethod;
+
+  private final Set<Annotation> qualifiers;
+
+  private final AnnotatedType<X> resourceClass;
   
-  public ResourceMethodDescriptor(final Method resourceMethod,
+  public ResourceMethodDescriptor(final AnnotatedType<X> resourceClass,
+                                  final Set<Annotation> qualifiers,
+                                  final AnnotatedMethod<? super X> resourceMethod,
                                   final String path,
                                   final Set<? extends MediaType> consumedMediaTypes,
                                   final Set<? extends MediaType> producedMediaTypes,
-                                  final Http.Method httpMethod) {
+                                  final Http.RequestMethod httpMethod) {
     super();
+    this.resourceClass = Objects.requireNonNull(resourceClass);
+    this.qualifiers = qualifiers;
     this.resourceMethod = Objects.requireNonNull(resourceMethod);
     this.path = Objects.requireNonNull(path);
     if (consumedMediaTypes == null || consumedMediaTypes.isEmpty()) {
@@ -77,8 +83,16 @@ public class ResourceMethodDescriptor {
     }
     this.httpMethod = Objects.requireNonNull(httpMethod);
   }
+
+  public AnnotatedType<X> getResourceClass() {
+    return this.resourceClass;
+  }
+
+  public Set<Annotation> getQualifiers() {
+    return this.qualifiers;
+  }
   
-  public Method getResourceMethod() {
+  public AnnotatedMethod<? super X> getResourceMethod() {
     return this.resourceMethod;
   }
   
@@ -94,7 +108,7 @@ public class ResourceMethodDescriptor {
     return this.producedMediaTypes;
   }
   
-  public Http.Method getHttpMethod() {
+  public Http.RequestMethod getHttpMethod() {
     return this.httpMethod;
   }
   
@@ -105,7 +119,7 @@ public class ResourceMethodDescriptor {
     if (path != null) {
       sb.append("@Path(").append("\"").append(path).append("\") ");
     }
-    final Http.Method httpMethod = this.getHttpMethod();
+    final Http.RequestMethod httpMethod = this.getHttpMethod();
     assert httpMethod != null;
     sb.append("@").append(httpMethod).append(" ");
     final Set<?> producedMediaTypes = this.getProducedMediaTypes();
@@ -138,66 +152,68 @@ public class ResourceMethodDescriptor {
       }
       sb.append(") ");
     }
-    sb.append(this.getResourceMethod());
-    return sb.toString();
+    return sb.append(this.getResourceClass().getJavaClass().getName()).append("#").append(this.getResourceMethod()).toString();
   }
   
-  public static <X> ResourceMethodDescriptor from(final BeanManager beanManager,
-                                                  final String applicationPath,
-                                                  final AnnotatedType<X> resourceClass,
-                                                  final AnnotatedMethod<? super X> resourceMethod)
-    throws ReflectiveOperationException {
+  public static final <X> ResourceMethodDescriptor<X> from(final BeanManager beanManager,
+                                                           final String applicationPath,
+                                                           final AnnotatedType<X> resourceClass,
+                                                           final Set<Annotation> qualifiers,
+                                                           final AnnotatedMethod<? super X> resourceMethod)
+  {
     Objects.requireNonNull(beanManager);
     Objects.requireNonNull(resourceClass);
     Objects.requireNonNull(resourceMethod);
-    ResourceMethodDescriptor returnValue = null;
-    final String path = getPath(applicationPath, resourceClass, resourceMethod);
-    assert path != null;
-    Produces produces = null;
-    Consumes consumes = null;
-    Http.Method httpMethod = null;
-    final Set<Annotation> jaxRsMethodLevelAnnotations = ResourceClasses.find(beanManager, resourceMethod, ResourceMethodDescriptor::getJaxRsMethodLevelAnnotations);
-    if (jaxRsMethodLevelAnnotations != null && !jaxRsMethodLevelAnnotations.isEmpty()) {
-      for (final Annotation annotation : jaxRsMethodLevelAnnotations) {
-        if (annotation instanceof Produces) {
-          if (produces == null) {
-            produces = (Produces)annotation;
-          }
-        } else if (annotation instanceof Consumes) {
-          if (consumes == null) {
-            consumes = (Consumes)annotation;
-          }
-        } else if (annotation instanceof Path) {
-          // Skip it; already processed            
-        } else {
-          final String httpMethodString = getHttpMethod(annotation);
-          if (httpMethodString != null) {
-            httpMethod = Http.Method.valueOf(httpMethodString);
-            assert httpMethod != null;
+    ResourceMethodDescriptor<X> returnValue = null;
+    if (!resourceMethod.isStatic() && Modifier.isPublic(resourceMethod.getJavaMember().getModifiers())) {
+      final String path = getPath(applicationPath, resourceClass, resourceMethod);
+      assert path != null;
+      Produces produces = null;
+      Consumes consumes = null;
+      Http.Method httpMethod = null;
+      final Set<Annotation> jaxRsMethodLevelAnnotations = ResourceClasses.find(beanManager, resourceMethod, ResourceMethodDescriptor::getJaxRsMethodLevelAnnotations);
+      if (jaxRsMethodLevelAnnotations != null && !jaxRsMethodLevelAnnotations.isEmpty()) {
+        for (final Annotation annotation : jaxRsMethodLevelAnnotations) {
+          if (annotation instanceof Produces) {
+            if (produces == null) {
+              produces = (Produces)annotation;
+            }
+          } else if (annotation instanceof Consumes) {
+            if (consumes == null) {
+              consumes = (Consumes)annotation;
+            }
+          } else if (annotation instanceof Path) {
+            // Skip it; already processed      
+          } else {
+            final String httpMethodString = getHttpMethod(annotation);
+            if (httpMethodString != null) {
+              httpMethod = Http.Method.valueOf(httpMethodString);
+              assert httpMethod != null;
+            }
           }
         }
       }
-    }
-    if (httpMethod != null) {
-      final Set<MediaType> producedMediaTypes = new HashSet<>();
-      if (produces != null) {
-        final String[] values = produces.value();
-        assert values != null;
-        for (String value : values) {
-          assert value != null;
-          producedMediaTypes.add(MediaType.parse(value.trim()));
+      if (httpMethod != null) {
+        final Set<MediaType> producedMediaTypes = new HashSet<>();
+        if (produces != null) {
+          final String[] values = produces.value();
+          assert values != null;
+          for (String value : values) {
+            assert value != null;
+            producedMediaTypes.add(MediaType.parse(value.trim()));
+          }
         }
-      }
-      final Set<MediaType> consumedMediaTypes = new HashSet<>();
-      if (consumes != null) {
-        final String[] values = consumes.value();
-        assert values != null;
-        for (String value : values) {
-          assert value != null;
-          consumedMediaTypes.add(MediaType.parse(value.trim()));
+        final Set<MediaType> consumedMediaTypes = new HashSet<>();
+        if (consumes != null) {
+          final String[] values = consumes.value();
+          assert values != null;
+          for (String value : values) {
+            assert value != null;
+            consumedMediaTypes.add(MediaType.parse(value.trim()));
+          }
         }
+        returnValue = new ResourceMethodDescriptor<>(resourceClass, qualifiers, resourceMethod, path, consumedMediaTypes, producedMediaTypes, httpMethod);
       }
-      returnValue = new ResourceMethodDescriptor(resourceMethod.getJavaMember(), path, consumedMediaTypes, producedMediaTypes, httpMethod);
     }
     return returnValue;
   }

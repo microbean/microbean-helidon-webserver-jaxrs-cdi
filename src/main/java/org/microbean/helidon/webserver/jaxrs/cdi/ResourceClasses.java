@@ -16,10 +16,8 @@
  */
 package org.microbean.helidon.webserver.jaxrs.cdi;
 
-import java.lang.reflect.Method;
+import java.lang.annotation.Annotation;
 
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Objects;
@@ -37,18 +35,19 @@ public final class ResourceClasses {
     super();
   }
 
-  public static final <X> Set<ResourceMethodDescriptor> getResourceMethodDescriptors(final BeanManager beanManager,
-                                                                                     final String applicationPath,
-                                                                                     final AnnotatedType<X> type)
+  public static final <X> Set<ResourceMethodDescriptor<X>> getResourceMethodDescriptors(final BeanManager beanManager,
+                                                                                        final String applicationPath,
+                                                                                        final AnnotatedType<X> type,
+                                                                                        final Set<Annotation> qualifiers)
     throws ReflectiveOperationException {
-    Set<ResourceMethodDescriptor> returnValue = null;
+    Set<ResourceMethodDescriptor<X>> returnValue = null;
     if (type != null) {
       final Set<AnnotatedMethod<? super X>> methods = type.getMethods();
       if (methods != null && !methods.isEmpty()) {
         returnValue = new HashSet<>();
         for (final AnnotatedMethod<? super X> method : methods) {
           if (method != null) {
-            final ResourceMethodDescriptor descriptor = ResourceMethodDescriptor.from(beanManager, applicationPath, type, method);
+            final ResourceMethodDescriptor<X> descriptor = ResourceMethodDescriptor.from(beanManager, applicationPath, type, qualifiers, method);
             if (descriptor != null) {
               returnValue.add(descriptor);
             }
@@ -59,7 +58,9 @@ public final class ResourceClasses {
     return returnValue;
   }
 
-  public static final <X, T> T find(final BeanManager beanManager, final AnnotatedMethod<? super X> source, Function<? super AnnotatedMethod<? super X>, T> tester) throws ReflectiveOperationException {
+  public static final <X, T> T find(final BeanManager beanManager,
+                                    final AnnotatedMethod<? super X> source,
+                                    Function<? super AnnotatedMethod<? super X>, T> tester) {
     Objects.requireNonNull(beanManager);
     Objects.requireNonNull(source);
     Objects.requireNonNull(tester);

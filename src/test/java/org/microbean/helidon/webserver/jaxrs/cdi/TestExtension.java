@@ -65,8 +65,6 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
-import org.microbean.helidon.webserver.cdi.HelidonWebServerExtension;
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -114,17 +112,17 @@ public class TestExtension {
   
   private void onStartup(@Observes @Initialized(ApplicationScoped.class) final Object event,
                          final Application application,
-                         final HelidonWebServerExtension shutMeDown)
+                         final WebServer webServer)
   {
     assertNotNull(application);
-    assertNotNull(shutMeDown);
+    assertNotNull(webServer);
     final Class<?> c = application.getClass();
     assertNotNull(c);
     assertTrue(c.isSynthetic()); // proves @Dependent got replaced with @ApplicationScoped
     final Class<?> superclass = c.getSuperclass();
     assertEquals(Application.class, superclass);
     assertNotNull(application.toString());
-    shutMeDown.shutDown();
+    webServer.shutdown();
   }
 
 
@@ -155,7 +153,6 @@ public class TestExtension {
     @Inject
     public MyApplication(final TestExtension injectee) {
       super();
-      System.out.println("*** injected! " + injectee);
       assertNotNull(injectee);
       assertNotNull(injectee.toString());
     }
@@ -176,10 +173,14 @@ public class TestExtension {
 
     @Path("/foo")
     @GET
-    public Object gorp() {
+    public Object gorp(final Gorp input) {
       return null;
     }
     
+  }
+
+  private static final class Gorp {
+
   }
   
 }
