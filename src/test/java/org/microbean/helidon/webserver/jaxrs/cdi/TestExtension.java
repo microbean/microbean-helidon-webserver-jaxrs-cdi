@@ -16,6 +16,7 @@
  */
 package org.microbean.helidon.webserver.jaxrs.cdi;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -29,6 +30,10 @@ import java.net.URL;
 import java.util.Objects;
 import java.util.Collections;
 import java.util.Set;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 
 import javax.annotation.Priority;
 
@@ -45,12 +50,18 @@ import javax.enterprise.inject.se.SeContainer;
 import javax.enterprise.inject.se.SeContainerInitializer;
 
 import javax.inject.Inject;
+import javax.inject.Singleton;
 
 import javax.ws.rs.ApplicationPath;
 import javax.ws.rs.GET;
 import javax.ws.rs.Path;
 
 import javax.ws.rs.core.Application;
+
+import io.helidon.common.http.DataChunk;
+import io.helidon.common.http.Reader;
+
+import io.helidon.common.reactive.Flow;
 
 import io.helidon.config.Config;
 
@@ -112,9 +123,12 @@ public class TestExtension {
   
   private void onStartup(@Observes @Initialized(ApplicationScoped.class) final Object event,
                          final Application application,
-                         final WebServer webServer)
+                         WebServer webServer)
+    throws ExecutionException, IOException, InterruptedException
   {
     assertNotNull(application);
+    assertNotNull(webServer);
+    webServer = webServer.start().toCompletableFuture().get();
     assertNotNull(webServer);
     final Class<?> c = application.getClass();
     assertNotNull(c);
@@ -122,6 +136,10 @@ public class TestExtension {
     final Class<?> superclass = c.getSuperclass();
     assertEquals(Application.class, superclass);
     assertNotNull(application.toString());
+    final URL url = new URL("http://127.0.0.1:" + webServer.port() + "/foo/frob/foo");
+    try (final InputStream stream = new BufferedInputStream(url.openStream())) {
+      assertNotNull(stream);
+    }
     webServer.shutdown();
   }
 
@@ -174,12 +192,27 @@ public class TestExtension {
     @Path("/foo")
     @GET
     public Object gorp(final Gorp input) {
+      // return input.toString();
       return null;
     }
     
   }
 
-  private static final class Gorp {
+  private static class Gorp {
+
+  }
+
+  @ApplicationScoped
+  @Entity // TODO: This is kind of irritating
+  private static class GorpReader implements Reader<Gorp> {
+
+    @Override
+    public CompletionStage<? extends Gorp> apply(final Flow.Publisher<DataChunk> publisher,
+                                                 final Class<? super Gorp> type) {
+      final CompletableFuture<Gorp> returnValue = new CompletableFuture<>();
+      returnValue.complete(new Gorp());
+      return returnValue;
+    }
 
   }
   

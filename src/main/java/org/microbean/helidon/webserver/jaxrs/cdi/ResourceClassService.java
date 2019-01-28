@@ -42,7 +42,7 @@ class ResourceClassService implements Service {
   @Override
   @Inject
   public void update(final Routing.Rules rules) {
-    Objects.requireNonNull(rules);    
+    Objects.requireNonNull(rules);
     for (final ResourceMethodHandler<?> handler : this.resourceMethodHandlers) {
       if (handler != null) {
         final ResourceMethodDescriptor<?> descriptor = handler.getResourceMethodDescriptor();

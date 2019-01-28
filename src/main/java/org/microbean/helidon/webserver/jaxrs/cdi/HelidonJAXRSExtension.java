@@ -23,13 +23,19 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.lang.reflect.Type;
 
+import java.util.Collection;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import java.util.concurrent.ExecutionException;
+
 import javax.annotation.Priority;
 
 import javax.enterprise.context.ApplicationScoped;
+import javax.enterprise.context.Dependent;
+import javax.enterprise.context.RequestScoped;
 
 import javax.enterprise.context.spi.CreationalContext;
 
@@ -37,6 +43,8 @@ import javax.enterprise.inject.Any;
 import javax.enterprise.inject.CreationException;
 
 import javax.enterprise.inject.spi.AfterBeanDiscovery;
+import javax.enterprise.inject.spi.AnnotatedMethod;
+import javax.enterprise.inject.spi.AnnotatedParameter;
 import javax.enterprise.inject.spi.AnnotatedType;
 import javax.enterprise.inject.spi.Bean;
 import javax.enterprise.inject.spi.BeanAttributes;
@@ -55,6 +63,7 @@ import javax.enterprise.inject.spi.configurator.BeanConfigurator;
 import javax.enterprise.event.Observes;
 
 import javax.enterprise.util.AnnotationLiteral;
+import javax.enterprise.util.TypeLiteral;
 
 import javax.inject.Qualifier;
 import javax.inject.Singleton;
@@ -83,6 +92,8 @@ import javax.ws.rs.ext.ParamConverterProvider;
 import javax.ws.rs.ext.Provider;
 import javax.ws.rs.ext.ReaderInterceptor;
 import javax.ws.rs.ext.WriterInterceptor;
+
+import io.helidon.webserver.ServerRequest;
 
 import org.microbean.helidon.webserver.cdi.HelidonWebServerExtension;
 
@@ -184,7 +195,7 @@ public class HelidonJAXRSExtension implements Extension {
       String applicationPathString = applicationPath.value();
       assert applicationPathString != null;
       if (!applicationPathString.isEmpty()) {
-        applicationPathString = ResourceMethodDescriptor.pattern.matcher(applicationPathString).replaceAll("$2");
+        applicationPathString = ResourceMethodDescriptor.pattern.matcher(applicationPathString).replaceAll("/$2");
       }
 
       final Set<Annotation> qualifiers = bean.getQualifiers();
@@ -196,44 +207,94 @@ public class HelidonJAXRSExtension implements Extension {
         .scope(Singleton.class)
         .createWith(ignored -> applicationPath);
       
-      final Set<Class<?>> classes = application.getClasses();
-      if (classes != null && !classes.isEmpty()) {
-        for (final Class<?> cls : classes) {
-          if (cls != null) {
+      final Set<Class<?>> applicationClasses = application.getClasses();
+      if (applicationClasses != null && !applicationClasses.isEmpty()) {
+        for (final Class<?> resourceOrProviderClass : applicationClasses) {
+          if (resourceOrProviderClass != null) {
             @SuppressWarnings("unchecked")
-            final AnnotatedType<U> annotatedType = beanManager.createAnnotatedType((Class<U>)cls);
-            assert annotatedType != null;
+            final AnnotatedType<U> resourceOrProviderAnnotatedType = beanManager.createAnnotatedType((Class<U>)resourceOrProviderClass);
+            assert resourceOrProviderAnnotatedType != null;
 
             final BeanConfigurator<U> bc = event.addBean();
             assert bc != null;
-            bc.read(annotatedType)
+            bc.read(resourceOrProviderAnnotatedType)
               .addQualifiers(qualifiers);
             
-            if (isProviderClass(cls)) {
+            if (isProviderClass(resourceOrProviderClass)) {
               // TODO: Features aren't supported, nor is it clear they should be
               bc.addQualifier(ProviderLiteral.INSTANCE);
 
             } else {
               final Set<? extends ResourceMethodDescriptor<U>> resourceMethodDescriptors =
-                ResourceClasses.getResourceMethodDescriptors(beanManager, applicationPathString, annotatedType, qualifiers);
+                ResourceClasses.getResourceMethodDescriptors(beanManager, applicationPathString, resourceOrProviderAnnotatedType, qualifiers);
               if (resourceMethodDescriptors != null && !resourceMethodDescriptors.isEmpty()) {
-                bc.addQualifier(new ResourceClass.Literal(cls));
+                bc.addQualifier(new ResourceClass.Literal(resourceOrProviderClass));
                 
                 for (final ResourceMethodDescriptor<U> descriptor : resourceMethodDescriptors) {
                   if (descriptor != null) {
 
+                    final AnnotatedMethod<? super U> resourceMethod = descriptor.getResourceMethod();
+                    assert resourceMethod != null;
+
+                    final List<? extends AnnotatedParameter<?>> parameters = resourceMethod.getParameters();
+                    if (parameters != null && !parameters.isEmpty()) {
+                      for (final AnnotatedParameter<?> parameter : parameters) {
+                        assert parameter != null;
+                        final Type baseType = parameter.getBaseType();
+                        assert baseType != null;
+                        final Collection<? extends Annotation> parameterAnnotations = parameter.getAnnotations();
+                        if (parameterAnnotations == null || parameterAnnotations.isEmpty()) {
+                          // Entity parameter.
+                          if (baseType instanceof Class) {
+                            // Helidon doesn't support generics here :-(
+                            final Class<?> entityType = (Class<?>)baseType;
+                            event.addBean()
+                              .addTransitiveTypeClosure(baseType)
+                              .addQualifiers(qualifiers)
+                              .addQualifiers(Entity.Literal.INSTANCE)
+                              .scope(RequestScoped.class)
+                              .produceWith(instance -> {
+                                  final ServerRequest request = instance.select(ServerRequest.class, qualifiers.toArray(new Annotation[qualifiers.size()])).get();
+                                  try {
+                                    // TODO: there's probably a better
+                                    // non-blocking way to do this in
+                                    // conjunction with
+                                    // RequestMethodHandler....
+                                    return request.content().as(entityType).toCompletableFuture().get();
+                                  } catch (final InterruptedException interruptedException) {
+                                    Thread.currentThread().interrupt();
+                                    throw new CreationException(interruptedException.getMessage(), interruptedException);
+                                  } catch (final ExecutionException executionException) {
+                                    throw new CreationException(executionException.getMessage(), executionException.getCause());
+                                  }
+                                });
+                          }
+
+                        } else {
+                          for (final Annotation parameterAnnotation : parameterAnnotations) {
+                            if (parameterAnnotation != null && beanManager.isQualifier(parameterAnnotation.annotationType())) {
+                              // Parameter with qualifiers (e.g. @PathParam, @QueryParam, etc)
+                              // TODO: add bean for it
+                            }
+                          }
+                        }
+                      }
+                    }
+                    
                     event.addBean()
                       .addTransitiveTypeClosure(descriptor.getClass())
                       .qualifiers(qualifiers)
                       .scope(ApplicationScoped.class)
                       .createWith(ignored -> descriptor);
-                    
+
                     // Create a Handler bean that wraps the JAX-RSish
                     // resource method.
                     event.addBean()
-                      .addTransitiveTypeClosure(ResourceMethodHandler.class)
+                      .addTransitiveTypeClosure(new TypeLiteral<ResourceMethodHandler<U>>() {
+                          private static final long serialVersionUID = 1L;
+                        }.getType())
                       .qualifiers(qualifiers)
-                      .scope(ApplicationScoped.class)
+                      .scope(Dependent.class) // TODO: don't like it
                       .createWith(ignored -> {
                           try {
                             return new ResourceMethodHandler<>(beanManager, descriptor);
@@ -301,9 +362,9 @@ public class HelidonJAXRSExtension implements Extension {
         .get()
         .params()
         .get(0);
-      for (final Annotation qualifier : qualifiers) {
-        apc.add(qualifier);
-      }
+        for (final Annotation qualifier : qualifiers) {
+          apc.add(qualifier);
+        }
 
       final BeanAttributes<ResourceClassService> beanAttributes = beanManager.createBeanAttributes(resourceClassServiceAnnotatedType);      
       final BeanAttributes<ResourceClassService> resourceClassServiceBeanAttributes = new DelegatingBeanAttributes<ResourceClassService>(beanAttributes) {
@@ -320,8 +381,12 @@ public class HelidonJAXRSExtension implements Extension {
           
         };
 
-      final Bean<ResourceClassService> resourceClassServiceBean = beanManager.createBean(resourceClassServiceBeanAttributes, ResourceClassService.class, itf);
+      final Bean<ResourceClassService> resourceClassServiceBean = beanManager.createBean(resourceClassServiceBeanAttributes, resourceClassServiceAnnotatedType.getJavaClass(), itf);
       event.addBean(resourceClassServiceBean);
+
+      // Add a producer for Content#as()
+      
+      
     }
     bean.destroy(application, cc);
     cc.release();
